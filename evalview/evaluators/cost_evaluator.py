@@ -26,7 +26,8 @@ class CostEvaluator:
             CostEvaluation with pass/fail status
         """
         total_cost = trace.metrics.total_cost
-        threshold = test_case.thresholds.max_cost or float("inf")
+        max_cost = test_case.thresholds.max_cost
+        threshold = max_cost if max_cost is not None else float("inf")
 
         # Warn if cost tracking isn't working
         if total_cost == 0.0 and trace.metrics.total_tokens is None:
@@ -42,7 +43,7 @@ class CostEvaluator:
             CostBreakdown(step_id=step.step_id, cost=step.metrics.cost) for step in trace.steps
         ]
 
-        passed = total_cost <= threshold
+        passed = total_cost >= 0 and total_cost <= threshold
 
         return CostEvaluation(
             total_cost=total_cost,

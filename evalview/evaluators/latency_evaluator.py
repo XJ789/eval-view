@@ -23,7 +23,8 @@ class LatencyEvaluator:
             LatencyEvaluation with pass/fail status
         """
         total_latency = trace.metrics.total_latency
-        threshold = test_case.thresholds.max_latency or float("inf")
+        max_latency = test_case.thresholds.max_latency
+        threshold = max_latency if max_latency is not None else float("inf")
 
         # Build breakdown by step
         breakdown = [
@@ -31,7 +32,7 @@ class LatencyEvaluator:
             for step in trace.steps
         ]
 
-        passed = total_latency <= threshold
+        passed = total_latency >= 0 and total_latency <= threshold
 
         return LatencyEvaluation(
             total_latency=total_latency,

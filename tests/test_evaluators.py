@@ -1053,7 +1053,6 @@ class TestCostEvaluator:
         result = evaluator.evaluate(sample_test_case, sample_execution_trace)
         assert result.passed is False  # Negative edge cases should not pass
 
-    @pytest.mark.xfail(reason="Negative cost should not pass, but handled gracefully")
     @pytest.mark.parametrize("thresholds, total_cost", [(Thresholds(min_score=70.0, max_cost=0.0), -1.0)], ids=["negative_cost"])
     def test_negative_cost(self, thresholds, total_cost, sample_test_case, sample_execution_trace):
         """Test that that negative total cost should not pass."""
@@ -1064,7 +1063,6 @@ class TestCostEvaluator:
         result = evaluator.evaluate(sample_test_case, sample_execution_trace)
         assert result.passed is False  # Negative cost should not pass
 
-    @pytest.mark.xfail(reason="Any cost should not pass with zero threshold")
     @pytest.mark.parametrize("thresholds, total_cost", [(Thresholds(min_score=70.0, max_cost=0.0), 100.0)], ids=["zero_cost_threshold"])
     def test_zero_cost_threshold(self, thresholds, total_cost, sample_test_case, sample_execution_trace):
         """Test that any cost with zero threshold should not pass."""
@@ -1230,7 +1228,6 @@ class TestLatencyEvaluator:
         result = evaluator.evaluate(sample_test_case, sample_execution_trace)
         assert result.passed is False  # Negative edge cases should not pass
 
-    @pytest.mark.xfail(reason="Negative cost should not pass, but handled gracefully")
     @pytest.mark.parametrize("thresholds, total_latency", [(Thresholds(min_score=70.0, max_latency=0.0), -1.0)], ids=["negative_latency"])
     def test_negative_latency(self, thresholds, total_latency, sample_test_case, sample_execution_trace):
         """Test that that negative total cost should not pass."""
@@ -1241,7 +1238,6 @@ class TestLatencyEvaluator:
         result = evaluator.evaluate(sample_test_case, sample_execution_trace)
         assert result.passed is False  # Negative latency should not pass    
 
-    @pytest.mark.xfail(reason="Any latency should not pass with zero threshold")
     @pytest.mark.parametrize("thresholds, total_latency", [(Thresholds(min_score=70.0, max_latency=0.0), float("inf"))], ids=["zero_latency_threshold"])
     def test_zero_latency_threshold(self, thresholds, total_latency, sample_test_case, sample_execution_trace):
         """Test that any latency with zero threshold should not pass."""
