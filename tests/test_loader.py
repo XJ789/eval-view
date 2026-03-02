@@ -345,7 +345,7 @@ thresholds:
   min_score: 85.0
   max_cost: 0.25
   max_latency: 3000.0
-adapter: custom_adapter
+adapter: langgraph
 endpoint: http://example.com/api
 adapter_config:
   timeout: 45
@@ -372,7 +372,7 @@ adapter_config:
         assert tc.thresholds.min_score == 85.0
         assert tc.thresholds.max_cost == 0.25
         assert tc.thresholds.max_latency == 3000.0
-        assert tc.adapter == "custom_adapter"
+        assert tc.adapter == "langgraph"
         assert tc.endpoint == "http://example.com/api"
         assert tc.adapter_config == {"timeout": 45, "retries": 3}
 
