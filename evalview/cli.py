@@ -8362,9 +8362,8 @@ def gym(suite: str, endpoint: str, list_only: bool):
 def login() -> None:
     """Connect to EvalView Cloud. Baselines sync automatically after login."""
     import webbrowser
-    import threading
+    import socket
     from http.server import HTTPServer, BaseHTTPRequestHandler
-    from urllib.parse import urlparse, parse_qs
     from evalview.cloud.auth import CloudAuth
     from evalview.cloud.client import CloudClient
 
@@ -8377,7 +8376,6 @@ def login() -> None:
         return
 
     # Find a free port in 8000-8100
-    import socket
     port = 8000
     for candidate in range(8000, 8101):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -8388,25 +8386,50 @@ def login() -> None:
     redirect_uri = f"http://127.0.0.1:{port}/callback"
     auth_url = CloudClient.build_oauth_url(redirect_uri)
 
-    # Shared state between handler and main thread
-    callback_result: Dict[str, Optional[str]] = {"code": None, "error": None}
-    server_ready = threading.Event()
+    # Supabase uses the implicit flow: tokens arrive in the URL *fragment* (#),
+    # which browsers never send to the server. We serve an HTML page that reads
+    # the fragment via JavaScript and POSTs the tokens to /token.
+    token_result: Dict[str, Optional[str]] = {"access_token": None, "refresh_token": None}
+
+    CALLBACK_HTML = """\
+<!DOCTYPE html><html><head><title>EvalView Login</title></head><body>
+<h2>Completing login\u2026</h2>
+<script>
+var params = new URLSearchParams(window.location.hash.substring(1));
+var at = params.get('access_token');
+var rt = params.get('refresh_token');
+if (at) {
+  fetch('/token', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({access_token: at, refresh_token: rt})
+  }).then(function() {
+    document.body.innerHTML = '<h2>Login successful! You can close this tab.</h2>';
+  });
+} else {
+  document.body.innerHTML = '<h2>Login failed \u2014 no token found. Please try again.</h2>';
+}
+</script></body></html>"""
 
     class _CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-            if "code" in params:
-                callback_result["code"] = params["code"][0]
-            elif "error" in params:
-                callback_result["error"] = params.get("error_description", ["Unknown error"])[0]
-            # Send a simple success page
-            body = b"<html><body><h2>Login successful! You can close this tab.</h2></body></html>"
+            # Serve the JS page that reads the fragment
+            body = CALLBACK_HTML.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            # Receive tokens POSTed by the JS page
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length).decode())
+            token_result["access_token"] = data.get("access_token")
+            token_result["refresh_token"] = data.get("refresh_token")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
 
         def log_message(self, format: str, *args: Any) -> None:
             pass  # Suppress server access logs
@@ -8421,33 +8444,29 @@ def login() -> None:
     webbrowser.open(auth_url)
     console.print("[dim]Waiting for GitHub authorization (timeout: 5 min)...[/dim]")
 
-    httpd.handle_request()  # Blocks until one request handled
+    httpd.handle_request()  # GET /callback — serves the HTML page
+    httpd.handle_request()  # POST /token   — receives the tokens
     httpd.server_close()
 
-    if callback_result["error"]:
-        console.print(f"[red]Login failed: {callback_result['error']}[/red]")
-        return
+    access_token = token_result.get("access_token")
+    refresh_token = token_result.get("refresh_token") or ""
 
-    code = callback_result["code"]
-    if not code:
-        console.print("[red]Login failed: no code received from GitHub.[/red]")
-        return
-
-    # Exchange code for session
-    session = asyncio.run(CloudClient.exchange_code(code))
-    if not session:
-        console.print("[red]Login failed: could not exchange code for session.[/red]")
+    if not access_token:
+        console.print("[red]Login failed: no token received.[/red]")
         console.print("[dim]Try running evalview login again.[/dim]")
         return
 
-    access_token = session.get("access_token", "")
-    refresh_token = session.get("refresh_token", "")
-    user = session.get("user", {})
+    # Fetch user info (email, id) from Supabase
+    user = asyncio.run(CloudClient.get_user_info(access_token))
+    if not user:
+        console.print("[red]Login failed: could not fetch user info.[/red]")
+        return
+
     user_id = user.get("id", "")
     email = user.get("email", "")
 
-    if not access_token or not user_id:
-        console.print("[red]Login failed: incomplete session data.[/red]")
+    if not user_id:
+        console.print("[red]Login failed: incomplete user data.[/red]")
         return
 
     auth.save(access_token, refresh_token, user_id, email)

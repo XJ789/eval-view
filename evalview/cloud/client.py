@@ -156,16 +156,17 @@ class CloudClient:
         )
 
     @staticmethod
-    async def exchange_code(code: str) -> Optional[Dict[str, Any]]:
-        """Exchange an OAuth code for a Supabase session. Returns None on failure."""
-        url = f"{_AUTH}/token?grant_type=pkce"
-        body = {"auth_code": code}
+    async def get_user_info(access_token: str) -> Optional[Dict[str, Any]]:
+        """Fetch user info (id, email) from Supabase using an access token."""
+        url = f"{_AUTH}/user"
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
+                resp = await client.get(
                     url,
-                    json=body,
-                    headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "apikey": SUPABASE_ANON_KEY,
+                    },
                 )
                 if resp.status_code != 200:
                     return None
