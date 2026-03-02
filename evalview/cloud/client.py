@@ -9,8 +9,8 @@ import httpx
 # Supabase project constants — both are PUBLIC values safe to ship in OSS.
 # RLS policies enforce that users can only access their own folder.
 # ---------------------------------------------------------------------------
-SUPABASE_URL = "https://placeholder.supabase.co"   # Replace with real project URL
-SUPABASE_ANON_KEY = "placeholder-anon-key"          # Replace with real anon key
+SUPABASE_URL = "https://kfukvasbjxybuubiwzgr.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_2M6kOxZfEUqoGB1DFSq4jg_KM5VzX2L"
 
 BUCKET = "goldens"
 _STORAGE = f"{SUPABASE_URL}/storage/v1"
