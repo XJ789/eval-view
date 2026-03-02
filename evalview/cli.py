@@ -281,25 +281,24 @@ def _detect_agent_endpoint() -> Optional[str]:
     if not open_ports:
         return None
 
-    # Try HTTP on open ports
+    # Try POST with a real query — only accept if response looks like an agent
     for port in open_ports:
         for path in paths:
             url = f"http://localhost:{port}{path}"
             try:
-                r = httpx.get(url, timeout=1.0)
-                if r.status_code not in (404, 405) and r.status_code < 500:
-                    return url
-            except Exception:
-                continue
-            try:
-                r = httpx.post(url, json={"query": "ping"}, timeout=1.0)
-                if r.status_code not in (404, 405) and r.status_code < 500:
-                    return url
+                r = httpx.post(url, json={"query": "ping"}, timeout=2.0)
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        # Must have an output field to count as an agent endpoint
+                        if "output" in data or "response" in data or "message" in data:
+                            return url
+                    except Exception:
+                        pass
             except Exception:
                 continue
 
-    # Fall back to base URL of first open port (no path guessing)
-    return f"http://localhost:{open_ports[0]}/"
+    return None
 
 
 def _autogen_tests(endpoint: str, tests_dir: Path) -> int:
