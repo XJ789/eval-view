@@ -314,14 +314,32 @@ def _autogen_tests(endpoint: str, tests_dir: Path) -> int:
     """
     import re
 
+    # Prepositions/articles that indicate a truncated fragment, not a complete query
+    _FRAGMENT_ENDINGS = (
+        " for", " the", " a", " an", " of", " in", " on", " to",
+        " with", " and", " or", " e.g.", "(e.g.",
+    )
+
     def _extract_example_queries(text: str) -> List[str]:
         """Pull out quoted or bulleted example queries from agent response."""
-        # Match lines like: - "Show me the latest pain points"  or  - Show me X
-        quoted = re.findall(r'["\u201c\u201d]([^"\u201c\u201d]{10,80})["\u201c\u201d]', text)
-        bulleted = re.findall(r'[-•]\s+"?([A-Z][^"\n]{10,60})"?', text)
+        # Raise minimum to 20 chars — short matches like "Search for " are fragments
+        quoted = re.findall(r'["\u201c\u201d]([^"\u201c\u201d]{20,80})["\u201c\u201d]', text)
+        bulleted = re.findall(r'[-•]\s+"?([A-Z][^"\n]{20,80})"?\s*$', text, re.MULTILINE)
         candidates = quoted + bulleted
-        # Filter out meta-sentences (not real queries)
-        return [q.strip() for q in candidates if "?" in q or q[0].isupper()][:3]
+        valid = []
+        for q in candidates:
+            q = q.strip().rstrip(",.")
+            words = q.split()
+            # Must have at least 3 words to be a meaningful query
+            if len(words) < 3:
+                continue
+            # Reject fragments that end mid-phrase (prepositions, articles)
+            if q.lower().endswith(_FRAGMENT_ENDINGS):
+                continue
+            # Must look like a query (starts with capital or contains ?)
+            if "?" in q or q[0].isupper():
+                valid.append(q)
+        return valid[:3]
 
     def _stable_phrases(text: str) -> List[str]:
         """Extract 1-2 short phrases likely to appear in future responses."""
@@ -350,6 +368,11 @@ def _autogen_tests(endpoint: str, tests_dir: Path) -> int:
             return None
 
     def _write_test(name: str, query: str, data: Dict[str, Any]) -> bool:
+        # Guard: reject incomplete or fragment queries before writing anything
+        query = query.strip()
+        if len(query) < 10 or len(query.split()) < 3 or query.lower().endswith(_FRAGMENT_ENDINGS):
+            return False
+
         output = data.get("output", "")
         tool_calls = data.get("tool_calls", [])
         tools = [tc["name"] for tc in tool_calls if isinstance(tc, dict)]
@@ -432,8 +455,8 @@ input:
 
 expected:
   output:
-    contains:
-      - ""   # Add a word or phrase you expect in the response
+    # contains:
+    #   - "phrase your agent always says"  # uncomment and fill in
     not_contains:
       - "error"
 
