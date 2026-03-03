@@ -128,6 +128,7 @@ def main(ctx):
 
     \b
     Check Your Agent:
+      capture                 Record real traffic as tests (recommended first step)
       run                     Check agent health
       run --diff              Compare against golden baseline
       run --save-golden       Save passing results as baseline
@@ -561,9 +562,43 @@ model:
     else:
         console.print("\n[yellow]⚠️  .evalview/config.yaml already exists[/yellow]")
 
-    # Auto-generate test cases by probing the agent
+    # ── Test generation path ──────────────────────────────────────────────────
     tests_dir = base_path / "tests" / "test-cases"
+
     if detected_endpoint:
+        console.print("\n[bold]How would you like to create your first tests?[/bold]\n")
+        console.print(
+            "  [bold green]1. Capture real interactions[/bold green] [dim](recommended)[/dim]\n"
+            "     Use your agent normally — every query becomes a test automatically.\n"
+            f"     [cyan]evalview capture --agent {endpoint}[/cyan]\n"
+        )
+        console.print(
+            "  [bold]2. Auto-probe agent[/bold]\n"
+            "     EvalView sends example queries now and saves the responses.\n"
+        )
+        console.print(
+            "  [bold]3. Blank template[/bold]\n"
+            "     Start from a hand-written YAML — full control, zero magic.\n"
+        )
+        path_choice = click.prompt(
+            "Choice", type=click.IntRange(1, 3), default=1
+        )
+    else:
+        path_choice = 3  # No agent detected — blank template only
+
+    if path_choice == 1:
+        # Capture path: write a placeholder so the tests dir isn't empty,
+        # then tell the user what to do next.
+        _write_blank_template(tests_dir, endpoint)
+        console.print(
+            f"\n[green]✅ Ready![/green] "
+            f"Start capturing real traffic with:\n"
+            f"\n  [cyan]evalview capture --agent {endpoint}[/cyan]\n"
+            f"\n[dim]The proxy starts on localhost:8091. Point your client there instead\n"
+            f"of {endpoint} and use your agent normally.\n"
+            f"Tests are saved to tests/test-cases/ automatically.[/dim]"
+        )
+    elif path_choice == 2:
         console.print("\n[cyan]Generating test cases from your agent...[/cyan]")
         n = _autogen_tests(endpoint, tests_dir)
         if n > 0:
@@ -752,10 +787,26 @@ pydantic>=2.0.0
         step2 = "[bold]2.[/bold] Set an API key\n   [cyan]export ANTHROPIC_API_KEY='sk-...'[/cyan]"
 
     snapshot_suffix = "   [dim]← syncs to cloud[/dim]" if logged_in else ""
-    step3 = f"[bold]→[/bold] Capture a baseline\n   [cyan]evalview snapshot[/cyan]{snapshot_suffix}"
-    step4 = "[bold]→[/bold] Check for regressions anytime\n   [cyan]evalview check[/cyan]"
 
-    body = f"{step1}\n{step2}\n\n{step3}\n\n{step4}\n\n[dim]Edit tests/test-cases/example.yaml to match your agent's queries[/dim]"
+    if detected_endpoint and path_choice == 1:
+        step3 = (
+            f"[bold]→[/bold] Generate tests from real traffic\n"
+            f"   [cyan]evalview capture --agent {endpoint}[/cyan]\n"
+            f"   [dim]Point your client to localhost:8091 and use your agent normally[/dim]"
+        )
+        step4 = (
+            f"[bold]→[/bold] Save as your regression baseline\n"
+            f"   [cyan]evalview snapshot[/cyan]{snapshot_suffix}"
+        )
+        step5 = "[bold]→[/bold] Check for regressions anytime\n   [cyan]evalview check[/cyan]"
+        body = f"{step1}\n{step2}\n\n{step3}\n\n{step4}\n\n{step5}"
+    else:
+        step3 = f"[bold]→[/bold] Capture a baseline\n   [cyan]evalview snapshot[/cyan]{snapshot_suffix}"
+        step4 = "[bold]→[/bold] Check for regressions anytime\n   [cyan]evalview check[/cyan]"
+        body = (
+            f"{step1}\n{step2}\n\n{step3}\n\n{step4}\n\n"
+            f"[dim]Edit tests/test-cases/my-first-test.yaml to match your agent's queries[/dim]"
+        )
 
     console.print(Panel(body, title="You're set up", border_style="green"))
 
@@ -8789,6 +8840,341 @@ def _cloud_pull(store: "GoldenStore") -> None:
         asyncio.run(_pull())
     except Exception:
         pass  # Silently skip — local goldens still work
+
+
+def _escape_yaml_str(s: str) -> str:
+    """Escape a string for YAML double-quoted context."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _extract_keywords_from_output(output: str, query: str) -> List[str]:
+    """Extract 2-3 meaningful keywords from agent output for contains assertions."""
+    if not output:
+        return []
+
+    keywords: List[str] = []
+
+    # Numbers are the most specific facts (e.g. "12", "22.5°C")
+    numbers = re.findall(r"\b\d+(?:\.\d+)?\b", output)
+    for n in numbers[:2]:
+        if n not in keywords:
+            keywords.append(n)
+
+    # Proper nouns (capitalised words that aren't common articles)
+    skip_words = {"the", "this", "that", "they", "their", "then", "there"}
+    proper = re.findall(r"\b[A-Z][a-z]{3,}\b", output)
+    for w in proper:
+        if len(keywords) >= 3:
+            break
+        if w.lower() not in skip_words and w not in keywords:
+            keywords.append(w)
+
+    # Fallback: any long word from the output
+    if not keywords:
+        words = re.findall(r"\b[a-zA-Z]{5,}\b", output)
+        seen: set = set()
+        for w in words[:15]:
+            if len(keywords) >= 2:
+                break
+            if w.lower() not in seen:
+                keywords.append(w)
+                seen.add(w.lower())
+
+    return keywords[:3]
+
+
+def _save_captures_as_tests(captures: List[Dict[str, Any]], output_dir: Path) -> int:
+    """Save captured interactions as test YAML files. Returns number of files written."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+
+    for cap in captures:
+        query: str = cap.get("query", "")
+        output: str = cap.get("output", "")
+        tools: List[str] = cap.get("tools", [])
+        idx: int = cap.get("idx", saved + 1)
+
+        if not query.strip():
+            continue
+
+        # Derive a slug from the first 40 chars of the query
+        slug = re.sub(r"[^a-z0-9-]", "-", query[:40].lower()).strip("-")
+        slug = re.sub(r"-+", "-", slug) or f"capture-{idx}"
+
+        path = output_dir / f"capture-{idx:02d}-{slug}.yaml"
+
+        contains = _extract_keywords_from_output(output, query)
+
+        lines = [
+            f'name: "capture-{idx:02d}"',
+            f'description: "Real interaction captured by evalview capture"',
+            "",
+            "input:",
+            f'  query: "{_escape_yaml_str(query)}"',
+            "",
+            "expected:",
+        ]
+
+        if tools:
+            lines.append("  tools:")
+            for t in tools:
+                lines.append(f"    - {t}")
+
+        lines += [
+            "  output:",
+            "    contains:",
+        ]
+        if contains:
+            for kw in contains:
+                lines.append(f'      - "{_escape_yaml_str(kw)}"')
+        else:
+            lines.append('      []  # Add phrases your agent always includes')
+
+        lines += [
+            "    not_contains:",
+            '      - "error"',
+            "",
+            "thresholds:",
+            "  min_score: 70",
+            "  max_latency: 15000",
+        ]
+
+        path.write_text("\n".join(lines) + "\n")
+        saved += 1
+
+    return saved
+
+
+@main.command()
+@click.option(
+    "--agent",
+    default=None,
+    help="Real agent URL to proxy to (auto-detected if not set)",
+)
+@click.option(
+    "--port",
+    default=8091,
+    type=int,
+    show_default=True,
+    help="Local port for the proxy to listen on",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default="tests/test-cases",
+    show_default=True,
+    help="Directory where captured test YAMLs are saved",
+)
+@track_command("capture")
+def capture(agent: Optional[str], port: int, output_dir: str) -> None:
+    """🎯 Capture real traffic as tests — tests from real usage, not guesses.
+
+    \b
+    Starts a transparent proxy that sits between your client and your agent.
+    Every request/response pair is saved as a test YAML automatically.
+
+    \b
+    Usage:
+      evalview capture --agent http://localhost:8000/invoke
+      # Now point your app/client to http://localhost:8091 instead
+      # Use your agent normally — each interaction becomes a test
+      # Press Ctrl+C when done — tests are written automatically
+
+    \b
+    Then:
+      evalview snapshot   ← save as your regression baseline
+      evalview check      ← catch regressions before they ship
+    """
+    import http.server
+    import socketserver
+    import threading as _threading
+    import json as _json
+
+    # ── Resolve agent URL ─────────────────────────────────────────────────────
+    if not agent:
+        detected = _detect_agent_endpoint()
+        if detected:
+            console.print(f"[green]✓ Auto-detected agent at {detected}[/green]")
+            agent = detected
+        else:
+            agent = click.prompt(
+                "Agent URL", default="http://localhost:8000/invoke"
+            )
+
+    agent_url: str = agent  # immutable in closure
+
+    # ── Shared state ──────────────────────────────────────────────────────────
+    captures: List[Dict[str, Any]] = []
+    lock = _threading.Lock()
+
+    # ── Proxy handler ─────────────────────────────────────────────────────────
+    class _ProxyHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            pass  # suppress default access log noise
+
+        def _forward(self, body: bytes) -> None:
+            query = ""
+            try:
+                data = _json.loads(body)
+                if isinstance(data, dict):
+                    if "query" in data:
+                        query = str(data["query"])
+                    elif "messages" in data:
+                        msgs = data["messages"]
+                        if isinstance(msgs, list):
+                            user_msgs = [
+                                m for m in msgs
+                                if isinstance(m, dict) and m.get("role") == "user"
+                            ]
+                            if user_msgs:
+                                query = str(user_msgs[-1].get("content", ""))
+            except Exception:
+                pass
+
+            try:
+                resp = httpx.post(
+                    agent_url,
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60.0,
+                )
+                resp_body = resp.content
+                status_code = resp.status_code
+
+                output = ""
+                tools: List[str] = []
+                try:
+                    resp_data = _json.loads(resp_body)
+                    output = str(resp_data.get("output", ""))
+                    raw_tools = resp_data.get("tool_calls", [])
+                    if isinstance(raw_tools, list):
+                        for t in raw_tools:
+                            if isinstance(t, dict):
+                                name = t.get("tool") or t.get("name") or ""
+                                if name:
+                                    tools.append(str(name))
+                except Exception:
+                    pass
+
+                if query.strip():
+                    with lock:
+                        captures.append({
+                            "query": query,
+                            "output": output,
+                            "tools": tools,
+                            "idx": len(captures) + 1,
+                        })
+
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp_body)
+
+            except Exception as exc:
+                err = _json.dumps({"error": str(exc)}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(err)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b""
+            self._forward(body)
+
+        def do_GET(self) -> None:
+            # Health / ready probe
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"proxy-active"}')
+
+    # ── Start proxy server ────────────────────────────────────────────────────
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.ThreadingTCPServer(("", port), _ProxyHandler)
+    server_thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    console.print()
+    console.print(Panel(
+        f"[bold green]Proxy live on http://localhost:{port}[/bold green]\n\n"
+        f"[dim]Forwarding to:[/dim] [cyan]{agent_url}[/cyan]\n\n"
+        f"Point your client to [bold cyan]http://localhost:{port}[/bold cyan]\n"
+        f"instead of your agent — every interaction is captured as a test.\n\n"
+        f"[dim]Press [bold]Ctrl+C[/bold] when done.[/dim]",
+        title="[bold]EvalView Capture[/bold]",
+        border_style="green",
+        padding=(1, 2),
+    ))
+    console.print()
+
+    # ── Live interaction table ────────────────────────────────────────────────
+    from rich.live import Live
+
+    def _build_table() -> Table:
+        with lock:
+            n = len(captures)
+            snap = list(captures)
+
+        t = Table(
+            title=f"Captured Interactions — {n} so far  [dim](Ctrl+C to save & exit)[/dim]",
+            box=None,
+            show_header=True,
+            header_style="bold",
+        )
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Query", style="cyan", max_width=48)
+        t.add_column("Tools", style="yellow", max_width=22)
+        t.add_column("Output preview", style="white", max_width=38)
+
+        for cap in snap:
+            q = cap["query"]
+            o = cap["output"]
+            tl = ", ".join(cap["tools"]) if cap["tools"] else "[dim]—[/dim]"
+            t.add_row(
+                str(cap["idx"]),
+                (q[:48] + "…") if len(q) > 48 else q,
+                tl,
+                (o[:38] + "…") if len(o) > 38 else o,
+            )
+        return t
+
+    try:
+        with Live(_build_table(), refresh_per_second=2, console=console) as live:
+            while True:
+                live.update(_build_table())
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+
+    # ── Save captured tests ───────────────────────────────────────────────────
+    console.print()
+    n_saved = _save_captures_as_tests(captures, Path(output_dir))
+
+    if n_saved > 0:
+        console.print(f"[green]✅ Saved {n_saved} test(s) to {output_dir}/[/green]")
+        console.print()
+        console.print(Panel(
+            f"[bold]You now have {n_saved} test(s) from real traffic.[/bold]\n\n"
+            "[bold]Next:[/bold]\n"
+            "  [cyan]evalview snapshot[/cyan]  ← save as your regression baseline\n"
+            "  [cyan]evalview check[/cyan]     ← check for regressions anytime\n\n"
+            "[dim]Tip: review the YAML files and refine the `contains:` assertions\n"
+            "for the most precise regression detection.[/dim]",
+            title="Capture complete",
+            border_style="green",
+        ))
+    else:
+        console.print(Panel(
+            "[yellow]No interactions were captured.[/yellow]\n\n"
+            f"Make sure your client is pointing to [cyan]http://localhost:{port}[/cyan]\n"
+            f"and your agent is running at [cyan]{agent_url}[/cyan].\n\n"
+            "Run [cyan]evalview capture[/cyan] again after sending some queries.",
+            title="Nothing captured",
+            border_style="yellow",
+        ))
 
 
 if __name__ == "__main__":
