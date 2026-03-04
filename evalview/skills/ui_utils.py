@@ -27,6 +27,9 @@ def print_evalview_banner(console: Console, subtitle: Optional[str] = None) -> N
         console: Rich console instance
         subtitle: Optional subtitle text to display below the banner
     """
+    import os
+    if os.environ.get("EVALVIEW_DEMO"):
+        return
     console.print()
     console.print("[bold cyan]╔══════════════════════════════════════════════════════════════════╗[/bold cyan]")
     console.print("[bold cyan]║[/bold cyan]  [bold green]███████╗██╗   ██╗ █████╗ ██╗    ██╗   ██╗██╗███████╗██╗    ██╗[/bold green]  [bold cyan]║[/bold cyan]")

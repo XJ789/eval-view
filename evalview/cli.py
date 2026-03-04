@@ -9078,7 +9078,8 @@ def _cloud_push(saved_test_names: List[str]) -> None:
         asyncio.run(_push())
         console.print("[dim]☁  Synced to cloud[/dim]")
     except Exception:
-        console.print("[dim]⚠  Cloud sync skipped (offline?)[/dim]")
+        if not os.environ.get("EVALVIEW_DEMO"):
+            console.print("[dim]⚠  Cloud sync skipped (offline?)[/dim]")
 
 
 def _cloud_pull(store: "GoldenStore") -> None:
