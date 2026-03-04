@@ -17,7 +17,7 @@
 
 # EvalView — The open-source testing framework for AI agents
 
-> **Regression testing for AI agents.** Save a golden baseline of your agent's behavior. Detect when it breaks. Block regressions in CI. Works with LangGraph, CrewAI, OpenAI, Claude, and any HTTP API.
+> **Ship AI agents without the fear of silent regressions.** Save a golden baseline of your agent's behavior. Detect when it breaks. Block regressions in CI. Works with LangGraph, CrewAI, OpenAI, Claude, and any HTTP API.
 
 <p align="center">
   <img src="assets/demo.gif" alt="EvalView Demo - AI Agent Testing Framework" width="700">
