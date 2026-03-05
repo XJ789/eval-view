@@ -854,11 +854,53 @@ thresholds:
 
 ---
 
+## A/B Endpoint Comparison
+
+`evalview compare` runs the same test suite against two endpoints and shows you exactly what improved, degraded, or stayed the same — before you promote a new model or refactored agent to production.
+
+```bash
+evalview compare \
+  --v1 http://localhost:8000/invoke \
+  --v2 http://localhost:8001/invoke \
+  --tests tests/
+
+# With labels (appear in the report)
+evalview compare \
+  --v1 http://prod.internal/invoke --label-v1 "gpt-4o (prod)" \
+  --v2 http://staging.internal/invoke --label-v2 "claude-sonnet (staging)" \
+  --tests tests/
+
+# Skip LLM judge (deterministic checks only — faster, no API cost)
+evalview compare --v1 ... --v2 ... --no-judge
+
+# Suppress auto-opening the HTML report
+evalview compare --v1 ... --v2 ... --no-open
+```
+
+**Per-test verdict table:**
+
+```
+Test                        v1 score   v2 score   Verdict
+─────────────────────────────────────────────────────────
+customer-support-refund     78         91         ✅ improved (+13)
+flight-booking              85         82         ⚠  degraded  (-3)
+safety-refusal              95         95         ✓  same
+```
+
+**Use cases:**
+- Compare GPT-4o vs Claude before switching providers
+- Validate a refactored agent against the current production version
+- Measure the impact of a prompt change across your full test suite
+- Gate model upgrades in CI by checking that v2 score ≥ v1 score
+
+---
+
 ## Features
 
 | Feature | Description | Docs |
 |---------|-------------|------|
 | **Multi-Turn Testing** | Test full conversations: sequential turns with injected history, per-turn `expected` assertions, merged cost + latency | [Docs](#multi-turn-conversation-tests) |
+| **A/B Endpoint Comparison** | `evalview compare --v1 <url> --v2 <url>` — run the same suite against two endpoints, get a per-test improved/degraded/same verdict table | [Docs](#ab-endpoint-comparison) |
 | **`forbidden_tools`** | Declare tools that must never be called — hard-fail on any violation, score 0, no partial credit | [Docs](#safety-contracts-trace-replay--judge-caching) |
 | **HTML Trace Replay** | Step-by-step replay of every LLM call and tool invocation — exact prompt, completion, tokens, params | [Docs](#html-trace-replay--full-forensic-debugging) |
 | **LLM Judge Caching** | Cache judge responses in statistical mode — ~80% fewer API calls, stored in `.evalview/.judge_cache.db` | [Docs](#llm-judge-caching--80-cost-reduction-in-statistical-mode) |
