@@ -3,7 +3,7 @@
 These tests exercise the specific improvements made during the silent-regression
 detection feature work:
 
-- _execute_check_tests returns (diffs, results, drift_tracker) — three-tuple
+- _execute_check_tests returns (diffs, results, drift_tracker, golden_traces) — four-tuple
 - Concurrent gather: one failing test does not cancel the others
 - DriftTracker is populated during execution and passed to _display_check_results
 - Semantic diff notice is shown when OPENAI_API_KEY is present
@@ -90,7 +90,7 @@ def _write_test_yaml(test_dir: Path, name: str, query: str = "hello") -> None:
 # ---------------------------------------------------------------------------
 
 class TestExecuteCheckTestsReturnType:
-    """_execute_check_tests must return a 3-tuple: (diffs, results, drift_tracker)."""
+    """_execute_check_tests must return a 4-tuple: (diffs, results, drift_tracker, golden_traces)."""
 
     @pytest.fixture
     def project(self, tmp_path):
@@ -99,7 +99,7 @@ class TestExecuteCheckTestsReturnType:
         _write_golden(tmp_path, "my-test")
         return tmp_path
 
-    def test_returns_three_tuple(self, project, monkeypatch):
+    def test_returns_four_tuple(self, project, monkeypatch):
         from evalview.commands.check_cmd import _execute_check_tests
         from evalview.core.config import EvalViewConfig
         from evalview.core.drift_tracker import DriftTracker
@@ -128,12 +128,13 @@ class TestExecuteCheckTestsReturnType:
             result = _execute_check_tests(test_cases, config, json_output=False)
 
         assert isinstance(result, tuple)
-        assert len(result) == 3, "Must return (diffs, results, drift_tracker)"
+        assert len(result) == 4, "Must return (diffs, results, drift_tracker, golden_traces)"
 
-        diffs, results, drift_tracker = result
+        diffs, results, drift_tracker, golden_traces = result
         assert isinstance(diffs, list)
         assert isinstance(results, list)
         assert isinstance(drift_tracker, DriftTracker)
+        assert isinstance(golden_traces, dict)
 
     def test_drift_tracker_is_populated(self, project, monkeypatch):
         """DriftTracker returned from _execute_check_tests must have history for the test."""
@@ -161,7 +162,7 @@ class TestExecuteCheckTestsReturnType:
             patch("evalview.commands.check_cmd._create_adapter", return_value=mock_adapter),
             patch("evalview.evaluators.evaluator.Evaluator", return_value=mock_evaluator),
         ):
-            _, _, drift_tracker = _execute_check_tests(test_cases, config, json_output=False)
+            _, _, drift_tracker, _ = _execute_check_tests(test_cases, config, json_output=False)
 
         history = drift_tracker.get_test_history("my-test")
         assert len(history) == 1, "DriftTracker should have one entry after one check"
@@ -219,7 +220,7 @@ class TestConcurrentExecution:
             patch("evalview.commands.check_cmd._create_adapter", return_value=mock_adapter),
             patch("evalview.evaluators.evaluator.Evaluator", return_value=mock_evaluator),
         ):
-            diffs, results, _ = _execute_check_tests(test_cases, config, json_output=True)
+            diffs, results, _, _ = _execute_check_tests(test_cases, config, json_output=True)
 
         # test-a failed → no diff for it
         # test-b succeeded → one diff

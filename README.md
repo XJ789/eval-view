@@ -212,17 +212,11 @@ evalview check
 
 ---
 
-### Semantic Similarity (`--semantic-diff`)
+### Semantic Similarity
 
 Lexical diff compares text character by character. "The answer is 4" vs "Four is the answer" scores 43% similar by lexical measure — but they're semantically identical.
 
-Enable embedding-based comparison to correctly distinguish wording changes from meaning changes:
-
-```bash
-evalview check --semantic-diff    # Requires OPENAI_API_KEY
-```
-
-EvalView scores outputs by meaning, not just wording:
+EvalView uses OpenAI embeddings to score outputs by meaning, not just wording:
 
 ```
 ✗ weather-lookup: OUTPUT_CHANGED
@@ -231,16 +225,29 @@ EvalView scores outputs by meaning, not just wording:
   Combined score:         74%
 ```
 
-**Cost:** ~$0.00004/test (2 embeddings via `text-embedding-3-small`, batched). Off by default — enable per run with `--semantic-diff` or permanently:
+**Auto-enabled** when `OPENAI_API_KEY` is set. EvalView prints a one-time notice the first time it activates, then stays silent. To opt out permanently:
 
 ```yaml
 # .evalview/config.yaml
 diff:
-  semantic_diff_enabled: true
-  semantic_similarity_weight: 0.7   # 70% semantic, 30% lexical
+  semantic_diff_enabled: false
 ```
 
-> ⚠️ When enabled, agent outputs are sent to OpenAI's embedding API. EvalView prints a cost notice before running. Do not use on tests containing confidential data.
+Or for a single run:
+
+```bash
+evalview check --no-semantic-diff
+```
+
+To force it on without a config file:
+
+```bash
+evalview check --semantic-diff
+```
+
+**Cost:** ~$0.00004/test (2 texts, 1 batched embedding call via `text-embedding-3-small`). At daily CI cadence, this is under $0.01/month for a typical test suite.
+
+> ⚠️ When enabled, agent outputs are sent to OpenAI's embedding API. Do not use on tests containing confidential data.
 
 ---
 
@@ -982,7 +989,7 @@ safety-refusal              95         95         ✓  same
 | **Snapshot/Check Workflow** | Simple `snapshot` then `check` commands for regression detection | [Docs](docs/GOLDEN_TRACES.md) |
 | **Silent Model Update Detection** | Captures model version at snapshot time; alerts when provider silently swaps the model | [Docs](#detecting-silent-model-updates) |
 | **Gradual Drift Detection** | OLS regression over 10-check window catches slow similarity decline that single-threshold checks miss | [Docs](#gradual-drift-detection) |
-| **Semantic Similarity** | `--semantic-diff` uses OpenAI embeddings to score outputs by meaning, not wording | [Docs](#semantic-similarity---semantic-diff) |
+| **Semantic Similarity** | Auto-enabled when `OPENAI_API_KEY` is set — scores outputs by meaning, not wording. One-time notice on first run. Opt out with `--no-semantic-diff` or `semantic_diff_enabled: false` | [Docs](#semantic-similarity) |
 | **Auto-Open Visual Reports** | Every `evalview run` opens an interactive HTML report — KPI cards, Mermaid trace diagrams, diffs, cost-per-query. `--no-open` for CI. | [Docs](#visual-reports--claude-code-mcp) |
 | **Git Hook Integration** | `evalview install-hooks` — injects `evalview check` into pre-push (or pre-commit). Automatic regression blocking with zero CI config. | [Docs](#cicd-integration) |
 | **Claude Code MCP** | 8 tools — run checks, generate tests, test skills, generate visual reports inline | [Docs](#claude-code-integration-mcp) |
@@ -1180,7 +1187,7 @@ evalview skill test tests.yaml --agent langgraph
 ## Frequently Asked Questions
 
 **Does EvalView require an API key?**
-No. The core regression detection — tool call diffing, sequence scoring, golden baseline comparison — is fully deterministic and works without any API key. An `OPENAI_API_KEY` is only needed if you want LLM-as-judge output quality scoring (`evalview run`) or semantic diff (`--semantic-diff`). `evalview snapshot` and `evalview check` are always free.
+No. The core regression detection — tool call diffing, sequence scoring, golden baseline comparison — is fully deterministic and works without any API key. If `OPENAI_API_KEY` is set, `evalview check` auto-enables semantic diff (~$0.00004/test). Disable it with `--no-semantic-diff` or `semantic_diff_enabled: false` in your config. LLM-as-judge output quality scoring (`evalview run`) also requires the key. `evalview snapshot` is always free.
 
 **How is EvalView different from LangSmith?**
 LangSmith is an observability platform: it records what your agent did and lets you inspect traces. EvalView is a regression testing framework: it saves a golden baseline and tells you when your agent's behavior deviates from it. They answer different questions. Many teams use both — LangSmith to understand production behavior, EvalView to gate changes in CI.

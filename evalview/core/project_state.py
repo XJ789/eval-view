@@ -47,6 +47,7 @@ class ProjectState(BaseModel):
 
     # Onboarding
     conversion_suggestion_shown: bool = False
+    semantic_auto_noticed: bool = False
 
 
 class ProjectStateStore:

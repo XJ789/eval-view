@@ -19,9 +19,10 @@ from evalview.telemetry.decorators import track_command
 if TYPE_CHECKING:
     from evalview.core.types import EvaluationResult, TestCase
     from evalview.core.config import EvalViewConfig
-    from evalview.core.diff import TraceDiff
+    from evalview.core.diff import TraceDiff, ToolDiff
     from evalview.core.project_state import ProjectState
     from evalview.core.drift_tracker import DriftTracker
+    from evalview.core.golden import GoldenTrace
 
 
 def _execute_check_tests(
@@ -29,7 +30,7 @@ def _execute_check_tests(
     config: Optional["EvalViewConfig"],
     json_output: bool,
     semantic_diff: bool = False,
-) -> Tuple[List[Tuple[str, "TraceDiff"]], List["EvaluationResult"], "DriftTracker"]:
+) -> Tuple[List[Tuple[str, "TraceDiff"]], List["EvaluationResult"], "DriftTracker", Dict[str, "GoldenTrace"]]:
     """Execute tests and compare against golden variants.
 
     Args:
@@ -39,12 +40,12 @@ def _execute_check_tests(
         semantic_diff: Enable embedding-based semantic similarity (opt-in).
 
     Returns:
-        Tuple of (diffs, results, drift_tracker) where diffs is [(test_name, TraceDiff)].
-        The drift_tracker is returned so callers can reuse it for detection without
-        creating a second instance that would re-read the history file.
+        Tuple of (diffs, results, drift_tracker, golden_traces) where
+        diffs is [(test_name, TraceDiff)] and golden_traces maps test name
+        to the primary GoldenTrace used for comparison.
     """
     import asyncio
-    from evalview.core.golden import GoldenStore
+    from evalview.core.golden import GoldenStore, GoldenTrace
     from evalview.core.diff import DiffEngine
     from evalview.core.config import DiffConfig
     from evalview.core.drift_tracker import DriftTracker
@@ -62,10 +63,11 @@ def _execute_check_tests(
     drift_tracker = DriftTracker()
     evaluator = Evaluator()
 
-    results = []
-    diffs = []
+    results: List["EvaluationResult"] = []
+    diffs: List[Tuple[str, "TraceDiff"]] = []
+    golden_traces: Dict[str, GoldenTrace] = {}
 
-    async def _run_one(tc) -> Optional[Tuple["EvaluationResult", "TraceDiff"]]:
+    async def _run_one(tc) -> Optional[Tuple["EvaluationResult", "TraceDiff", GoldenTrace]]:
         """Run a single test: execute → evaluate → diff (async pipeline)."""
         adapter_type = tc.adapter or (config.adapter if config else None)
         endpoint = tc.endpoint or (config.endpoint if config else None)
@@ -91,7 +93,7 @@ def _execute_check_tests(
         diff = await diff_engine.compare_multi_reference_async(
             golden_variants, trace, result.score
         )
-        return result, diff
+        return result, diff, golden_variants[0]
 
     # Run all tests concurrently in a single event loop.
     # return_exceptions=True means exceptions are returned as values (not raised),
@@ -111,12 +113,13 @@ def _execute_check_tests(
             continue
         if outcome is None:
             continue
-        result, diff = outcome
+        result, diff, golden = outcome
         results.append(result)
         diffs.append((tc.name, diff))
+        golden_traces[tc.name] = golden
         drift_tracker.record_check(tc.name, diff)
 
-    return diffs, results, drift_tracker
+    return diffs, results, drift_tracker, golden_traces
 
 
 def _analyze_check_diffs(diffs: List[Tuple[str, "TraceDiff"]]) -> Dict[str, Any]:
@@ -140,6 +143,126 @@ def _analyze_check_diffs(diffs: List[Tuple[str, "TraceDiff"]]) -> Dict[str, Any]
     }
 
 
+def _print_parameter_diffs(tool_diffs: List["ToolDiff"]) -> None:
+    """Print parameter-level differences for tool calls."""
+    from rich.table import Table
+
+    has_param_diffs = any(td.parameter_diffs for td in tool_diffs)
+    if not has_param_diffs:
+        return
+
+    table = Table(
+        title="Parameter Changes",
+        show_header=True,
+        header_style="bold",
+        show_lines=False,
+        padding=(0, 1),
+    )
+    table.add_column("Step", style="dim", width=5)
+    table.add_column("Tool", style="cyan", min_width=12)
+    table.add_column("Param", style="bold", min_width=10)
+    table.add_column("Baseline", min_width=15)
+    table.add_column("Current", min_width=15)
+    table.add_column("", width=8)
+
+    for td in tool_diffs:
+        if not td.parameter_diffs:
+            continue
+        tool_name = td.golden_tool or td.actual_tool or "?"
+        for pd in td.parameter_diffs:
+            # Format the change indicator
+            if pd.diff_type == "missing":
+                indicator = "[red]-removed[/red]"
+                golden_val = str(pd.golden_value)[:40]
+                actual_val = "[dim]—[/dim]"
+            elif pd.diff_type == "added":
+                indicator = "[green]+added[/green]"
+                golden_val = "[dim]—[/dim]"
+                actual_val = str(pd.actual_value)[:40]
+            elif pd.similarity is not None:
+                pct = int(pd.similarity * 100)
+                color = "green" if pct >= 80 else "yellow" if pct >= 50 else "red"
+                indicator = f"[{color}]{pct}%[/{color}]"
+                golden_val = str(pd.golden_value)[:40]
+                actual_val = str(pd.actual_value)[:40]
+            else:
+                indicator = "[yellow]~[/yellow]"
+                golden_val = str(pd.golden_value)[:40]
+                actual_val = str(pd.actual_value)[:40]
+
+            table.add_row(
+                str(td.position + 1),
+                tool_name,
+                pd.param_name,
+                golden_val,
+                actual_val,
+                indicator,
+            )
+
+    console.print(table)
+    console.print()
+
+
+def _print_output_diff(diff: "TraceDiff") -> None:
+    """Print output similarity and unified diff excerpt."""
+    if not diff.output_diff:
+        return
+
+    od = diff.output_diff
+    if od.similarity >= 0.95:
+        return  # Close enough, don't show
+
+    # Similarity line
+    sim_pct = int(od.similarity * 100)
+    sim_color = "green" if sim_pct >= 80 else "yellow" if sim_pct >= 50 else "red"
+    parts = [f"[{sim_color}]{sim_pct}% lexical[/{sim_color}]"]
+    if od.semantic_similarity is not None:
+        sem_pct = int(od.semantic_similarity * 100)
+        sem_color = "green" if sem_pct >= 80 else "yellow" if sem_pct >= 50 else "red"
+        parts.append(f"[{sem_color}]{sem_pct}% semantic[/{sem_color}]")
+    console.print(f"    Output similarity: {' / '.join(parts)}")
+
+    # Show a few diff lines (max 8) for context
+    meaningful_lines = [
+        line for line in od.diff_lines
+        if line.startswith("+") or line.startswith("-")
+        if not line.startswith("+++") and not line.startswith("---")
+    ]
+    if meaningful_lines:
+        for line in meaningful_lines[:8]:
+            if line.startswith("+"):
+                console.print(f"      [green]{line}[/green]")
+            else:
+                console.print(f"      [red]{line}[/red]")
+        if len(meaningful_lines) > 8:
+            console.print(f"      [dim]... {len(meaningful_lines) - 8} more lines[/dim]")
+    console.print()
+
+
+def _print_inline_trajectory(diff: "TraceDiff", golden: Optional["GoldenTrace"], result: Optional["EvaluationResult"]) -> None:
+    """Print a compact inline trajectory comparison for check output."""
+    golden_seq: List[str] = []
+    actual_seq: List[str] = []
+
+    if golden:
+        golden_seq = golden.tool_sequence or []
+    if result:
+        try:
+            actual_seq = [
+                str(getattr(s, "tool_name", None) or getattr(s, "step_name", "?"))
+                for s in (result.trace.steps or [])
+            ]
+        except AttributeError:
+            pass
+
+    if not golden_seq and not actual_seq:
+        return
+
+    if golden_seq != actual_seq:
+        console.print(f"    [dim]Baseline:[/dim] {' → '.join(golden_seq) or '(none)'}")
+        console.print(f"    [dim]Current:[/dim]  {' → '.join(actual_seq) or '(none)'}")
+
+
 def _display_check_results(
     diffs: List[Tuple[str, "TraceDiff"]],
     analysis: Dict[str, Any],
@@ -147,6 +270,8 @@ def _display_check_results(
     is_first_check: bool,
     json_output: bool,
     drift_tracker: Optional["DriftTracker"] = None,
+    golden_traces: Optional[Dict[str, "GoldenTrace"]] = None,
+    results: Optional[List["EvaluationResult"]] = None,
 ) -> None:
     """Display check results in JSON or console format.
 
@@ -155,6 +280,8 @@ def _display_check_results(
                        a new instance is created (legacy behaviour). Pass the
                        instance from _execute_check_tests to avoid reading the
                        history file twice.
+        golden_traces: Dict mapping test name to primary GoldenTrace (for inline trajectory).
+        results: List of EvaluationResult objects (for inline trajectory).
     """
     from evalview.core.diff import DiffStatus
     from evalview.core.celebrations import Celebrations
@@ -162,8 +289,15 @@ def _display_check_results(
     from evalview.core.messages import get_random_clean_check_message
     from rich.panel import Panel
 
+    # Build result lookup by test name
+    result_by_name: Dict[str, Any] = {}
+    if results:
+        for r in results:
+            result_by_name[r.test_case] = r
+
     if json_output:
-        # JSON output for CI — include model change and semantic similarity info
+        # JSON output for CI — include model change, semantic similarity, and
+        # per-test tool diffs and parameter changes for machine consumption.
         output = {
             "summary": {
                 "total_tests": len(diffs),
@@ -179,6 +313,26 @@ def _display_check_results(
                     "status": diff.overall_severity.value,
                     "score_delta": diff.score_diff,
                     "has_tool_diffs": len(diff.tool_diffs) > 0,
+                    "tool_diffs": [
+                        {
+                            "type": td.type,
+                            "position": td.position,
+                            "golden_tool": td.golden_tool,
+                            "actual_tool": td.actual_tool,
+                            "message": td.message,
+                            "parameter_diffs": [
+                                {
+                                    "param": pd.param_name,
+                                    "golden": pd.golden_value,
+                                    "actual": pd.actual_value,
+                                    "type": pd.diff_type,
+                                    "similarity": pd.similarity,
+                                }
+                                for pd in td.parameter_diffs
+                            ],
+                        }
+                        for td in diff.tool_diffs
+                    ],
                     "output_similarity": diff.output_diff.similarity if diff.output_diff else 1.0,
                     "semantic_similarity": (
                         diff.output_diff.semantic_similarity if diff.output_diff else None
@@ -256,7 +410,8 @@ def _display_check_results(
 
             console.print()
 
-            # Show details of changed tests
+            # Show details of changed tests with inline trajectory + parameter diffs
+            _goldens = golden_traces or {}
             for name, diff in diffs:
                 if diff.overall_severity != DiffStatus.PASSED:
                     severity_icon = {
@@ -265,8 +420,27 @@ def _display_check_results(
                         DiffStatus.OUTPUT_CHANGED: "[dim]~ OUTPUT_CHANGED[/dim]",
                     }.get(diff.overall_severity, "?")
 
-                    console.print(f"{severity_icon}: {name}")
-                    console.print(f"    {diff.summary()}")
+                    # Score delta
+                    score_part = ""
+                    if abs(diff.score_diff) > 1:
+                        sign = "+" if diff.score_diff > 0 else ""
+                        score_color = "green" if diff.score_diff > 0 else "red"
+                        score_part = f"  [{score_color}]{sign}{diff.score_diff:.1f} pts[/{score_color}]"
+
+                    console.print(f"{severity_icon}: {name}{score_part}")
+
+                    # Inline trajectory comparison (tool sequence)
+                    golden_for_test = _goldens.get(name)
+                    result_for_test = result_by_name.get(name)
+                    _print_inline_trajectory(diff, golden_for_test, result_for_test)
+
+                    # Parameter-level diffs (compact)
+                    if diff.tool_diffs:
+                        _print_parameter_diffs(diff.tool_diffs)
+
+                    # Output similarity + diff excerpt
+                    _print_output_diff(diff)
+
                     quoted = f'"{name}"' if " " in name else name
                     console.print(f"    [dim]→ evalview replay {quoted}[/dim]")
                     console.print()
@@ -375,15 +549,19 @@ def _compute_check_exit_code(
 @click.option("--json", "json_output", is_flag=True, help="Output JSON for CI")
 @click.option("--fail-on", help="Comma-separated statuses to fail on (default: REGRESSION)")
 @click.option("--strict", is_flag=True, help="Fail on any change (REGRESSION, TOOLS_CHANGED, OUTPUT_CHANGED)")
+@click.option("--report", "report_path", default=None, type=click.Path(), help="Generate HTML report at this path (auto-opens in browser)")
 @click.option(
-    "--semantic-diff",
+    "--semantic-diff/--no-semantic-diff",
     "semantic_diff",
-    is_flag=True,
-    default=False,
-    help="Enable embedding-based semantic similarity (requires OPENAI_API_KEY, adds ~$0.00004/test)",
+    default=None,
+    help=(
+        "Enable/disable embedding-based semantic similarity. "
+        "Auto-enabled when OPENAI_API_KEY is set (adds ~$0.00004/test). "
+        "Use --no-semantic-diff to opt out."
+    ),
 )
 @track_command("check")
-def check(test_path: str, test: str, json_output: bool, fail_on: str, strict: bool, semantic_diff: bool):
+def check(test_path: str, test: str, json_output: bool, fail_on: str, strict: bool, report_path: Optional[str], semantic_diff: Optional[bool]):
     """Check current behavior against snapshot baseline.
 
     This command runs tests and compares them against your saved baselines,
@@ -395,8 +573,10 @@ def check(test_path: str, test: str, json_output: bool, fail_on: str, strict: bo
         evalview check                                   # Check all tests
         evalview check --test "my-test"                  # Check one test
         evalview check --json                            # JSON output for CI
+        evalview check --report report.html              # Generate HTML report
         evalview check --fail-on REGRESSION,TOOLS_CHANGED
         evalview check --strict                          # Fail on any change
+        evalview check --no-semantic-diff                # Opt out of semantic diff
     """
     from evalview.core.loader import TestCaseLoader
     from evalview.core.golden import GoldenStore
@@ -449,23 +629,45 @@ def check(test_path: str, test: str, json_output: bool, fail_on: str, strict: bo
     # Load config
     config = _load_config_if_exists()
 
-    # Semantic diff notice — shown once before execution so users know outputs
-    # are sent to the OpenAI embedding API and can abort if undesired.
-    if semantic_diff and not json_output:
-        from evalview.core.semantic_diff import SemanticDiff
-        if SemanticDiff.is_available():
-            console.print(
-                f"[dim]ℹ  Semantic diff enabled. {SemanticDiff.cost_notice()} "
-                "Agent outputs are sent to OpenAI for embedding comparison.[/dim]\n"
-            )
+    # Resolve semantic diff: explicit flag > config file > auto-enable.
+    # Priority (highest to lowest):
+    #   1. --no-semantic-diff flag  → always off
+    #   2. --semantic-diff flag     → on if key available, warn otherwise
+    #   3. config semantic_diff_enabled: false → always off
+    #   4. auto-enable when OPENAI_API_KEY is set
+    from evalview.core.semantic_diff import SemanticDiff
+    key_available = SemanticDiff.is_available()
+
+    if semantic_diff is None:
+        # No explicit flag — check config, then auto-enable if key is present.
+        config_setting = config.get_diff_config().semantic_diff_enabled if config else None
+        if config_setting is False:
+            # User explicitly disabled it in config — respect that.
+            semantic_diff = False
         else:
+            semantic_diff = key_available
+        if semantic_diff and not json_output:
+            # Show one-time notice so users know this is happening
+            state_for_notice = state_store.load()
+            if not state_for_notice.semantic_auto_noticed:
+                console.print(
+                    "[dim]ℹ  Semantic diff auto-enabled (OPENAI_API_KEY detected). "
+                    f"{SemanticDiff.cost_notice()}. "
+                    "Use --no-semantic-diff to opt out.[/dim]\n"
+                )
+                state_for_notice.semantic_auto_noticed = True
+                state_store.save(state_for_notice)
+    elif semantic_diff and not key_available:
+        # User explicitly requested it but key is missing
+        if not json_output:
             console.print(
                 "[yellow]⚠  --semantic-diff requested but OPENAI_API_KEY is not set. "
                 "Falling back to lexical comparison.[/yellow]\n"
             )
+        semantic_diff = False
 
     # Execute tests and compare against golden
-    diffs, results, drift_tracker = _execute_check_tests(test_cases, config, json_output, semantic_diff)
+    diffs, results, drift_tracker, golden_traces = _execute_check_tests(test_cases, config, json_output, semantic_diff)
 
     # Analyze diffs
     analysis = _analyze_check_diffs(diffs)
@@ -477,7 +679,27 @@ def check(test_path: str, test: str, json_output: bool, fail_on: str, strict: bo
     )
 
     # Display results (reuse drift_tracker instance to avoid re-reading history file)
-    _display_check_results(diffs, analysis, state, is_first_check, json_output, drift_tracker=drift_tracker)
+    _display_check_results(
+        diffs, analysis, state, is_first_check, json_output,
+        drift_tracker=drift_tracker,
+        golden_traces=golden_traces,
+        results=results,
+    )
+
+    # Generate HTML report if requested
+    if report_path and results:
+        from evalview.visualization import generate_visual_report
+        diff_list = [d for _, d in diffs]
+        path = generate_visual_report(
+            results=results,
+            diffs=diff_list,
+            golden_traces=golden_traces,
+            output_path=report_path,
+            auto_open=not json_output,
+            title="EvalView Check Report",
+        )
+        if not json_output:
+            console.print(f"[green]◈ Report:[/green] {path}\n")
 
     # Compute and exit with code
     exit_code = _compute_check_exit_code(diffs, fail_on, strict)
@@ -532,7 +754,7 @@ def replay(test_name: str, test_path: str, no_browser: bool) -> None:
 
     console.print(f"\n[cyan]◈ Replaying '{test_name}'...[/cyan]\n")
 
-    diffs, results, _ = _execute_check_tests([matching[0]], config, json_output=False)
+    diffs, results, _, _ = _execute_check_tests([matching[0]], config, json_output=False)
 
     if not results:
         console.print("[red]❌ Test execution failed — check your agent is running[/red]\n")

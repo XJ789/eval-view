@@ -106,14 +106,19 @@ class DiffConfig(BaseModel):
         description="Ignore case differences in output comparison"
     )
 
-    # Semantic similarity via embeddings (opt-in — requires OPENAI_API_KEY)
-    # When enabled, blends cosine similarity of embeddings with lexical similarity
-    # to catch semantic drift that SequenceMatcher misses (e.g. same meaning,
-    # different wording after a model update).
-    semantic_diff_enabled: bool = Field(
-        default=False,
+    # Semantic similarity via embeddings (auto-enabled when OPENAI_API_KEY is set)
+    # Blends cosine similarity of embeddings with lexical similarity to catch semantic
+    # drift that SequenceMatcher misses (e.g. same meaning, different wording after a
+    # model update).
+    # None  = not configured; evalview check auto-enables when OPENAI_API_KEY is present
+    # True  = always enabled
+    # False = explicitly disabled (overrides auto-enable and --semantic-diff flag)
+    semantic_diff_enabled: Optional[bool] = Field(
+        default=None,
         description=(
-            "Enable embedding-based semantic similarity comparison (opt-in). "
+            "Control embedding-based semantic similarity. "
+            "null/unset: auto-enable when OPENAI_API_KEY is present. "
+            "true: always on. false: always off. "
             "Requires OPENAI_API_KEY. Adds ~$0.00004 per check."
         ),
     )

@@ -261,6 +261,86 @@ def _build_failed_tests_section(results: List[Dict[str, Any]], max_items: int = 
     return lines
 
 
+def _build_check_summary_table(check_data: Dict[str, Any]) -> List[str]:
+    """Build summary table from check --json output format.
+
+    Args:
+        check_data: Parsed JSON from `evalview check --json`
+
+    Returns:
+        List of markdown lines for the table
+    """
+    summary = check_data.get("summary", {})
+    total = summary.get("total_tests", 0)
+    unchanged = summary.get("unchanged", 0)
+    regressions = summary.get("regressions", 0)
+    tools_changed = summary.get("tools_changed", 0)
+    output_changed = summary.get("output_changed", 0)
+    pass_rate = (unchanged / total * 100) if total > 0 else 0
+
+    lines = [
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Tests | {unchanged}/{total} unchanged ({pass_rate:.0f}%) |",
+    ]
+    if regressions:
+        lines.append(f"| Regressions | {regressions} |")
+    if tools_changed:
+        lines.append(f"| Tools Changed | {tools_changed} |")
+    if output_changed:
+        lines.append(f"| Output Changed | {output_changed} |")
+    if summary.get("model_changed"):
+        lines.append("| Model Changed | Yes |")
+    return lines
+
+
+def _build_check_changes_section(check_data: Dict[str, Any], max_items: int = 5) -> List[str]:
+    """Build changes section from check --json output format.
+
+    Args:
+        check_data: Parsed JSON from `evalview check --json`
+
+    Returns:
+        List of markdown lines
+    """
+    diffs = check_data.get("diffs", [])
+    changes = [d for d in diffs if d.get("status") != "passed"]
+    if not changes:
+        return []
+
+    lines = ["### Changes from Baseline", ""]
+
+    for diff in changes[:max_items]:
+        test_name = diff.get("test_name", "Unknown")
+        status = diff.get("status", "passed")
+        status_display = get_status_display(status)
+
+        summary_parts = []
+
+        score_delta = diff.get("score_delta", 0)
+        if abs(score_delta) > 1:
+            sign = "+" if score_delta > 0 else ""
+            summary_parts.append(f"score {sign}{score_delta:.1f}")
+
+        tool_diffs = diff.get("tool_diffs", [])
+        if tool_diffs:
+            summary_parts.append(f"{len(tool_diffs)} tool change(s)")
+
+        sim = diff.get("output_similarity", 1.0)
+        if sim < 0.95:
+            summary_parts.append(f"output {sim:.0%} similar")
+
+        summary = ", ".join(summary_parts) if summary_parts else "minor changes"
+        lines.append(f"- {status_display['emoji']} **{test_name}**: {summary}")
+
+    remaining = len(changes) - max_items
+    if remaining > 0:
+        lines.append(f"- ... and {remaining} more")
+
+    lines.append("")
+    return lines
+
+
 def generate_pr_comment(
     results: List[Dict[str, Any]],
     diff_results: Optional[List[Dict[str, Any]]] = None,
@@ -301,6 +381,57 @@ def generate_pr_comment(
         lines.extend(_build_failed_tests_section(results))
 
     # Footer
+    if run_url:
+        lines.append(f"[View full report]({run_url})")
+        lines.append("")
+
+    lines.append("---")
+    lines.append(COMMENT_SIGNATURE)
+
+    return "\n".join(lines)
+
+
+def generate_check_pr_comment(
+    check_data: Dict[str, Any],
+    run_url: Optional[str] = None,
+) -> str:
+    """Generate markdown PR comment from check --json output.
+
+    This is the preferred path for CI — produces cleaner, diff-focused comments
+    compared to the generic generate_pr_comment which works with run results.
+
+    Args:
+        check_data: Parsed JSON from `evalview check --json`
+        run_url: Optional link to the GitHub Actions run
+
+    Returns:
+        Markdown string for PR comment
+    """
+    summary = check_data.get("summary", {})
+    regressions = summary.get("regressions", 0)
+    tools_changed = summary.get("tools_changed", 0)
+    output_changed = summary.get("output_changed", 0)
+
+    if regressions > 0:
+        overall_status = "regression"
+    elif tools_changed > 0:
+        overall_status = "tools_changed"
+    elif output_changed > 0:
+        overall_status = "output_changed"
+    else:
+        overall_status = "passed"
+
+    status_display = get_status_display(overall_status)
+
+    lines = []
+    lines.append(f"## {status_display['emoji']} EvalView: {status_display['label']}")
+    lines.append("")
+
+    lines.extend(_build_check_summary_table(check_data))
+    lines.append("")
+
+    lines.extend(_build_check_changes_section(check_data))
+
     if run_url:
         lines.append(f"[View full report]({run_url})")
         lines.append("")

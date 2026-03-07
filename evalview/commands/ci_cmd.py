@@ -61,6 +61,7 @@ def ci_comment(results: Optional[str], dry_run: bool, update: bool):
     from evalview.ci.comment import (
         load_latest_results,
         generate_pr_comment,
+        generate_check_pr_comment,
         post_pr_comment,
         update_or_create_comment,
     )
@@ -74,21 +75,8 @@ def ci_comment(results: Optional[str], dry_run: bool, update: bool):
 
     if not data:
         console.print("[red]No results found.[/red]")
-        console.print("[dim]Run 'evalview run' first, or specify --results path.[/dim]")
+        console.print("[dim]Run 'evalview run' or 'evalview check --json' first, or specify --results path.[/dim]")
         sys.exit(1)
-
-    # Handle both list and dict formats
-    if type(data).__name__ == "list":
-        results_list = data
-    elif type(data).__name__ == "dict" and "results" in data:
-        results_list = data["results"]
-    else:
-        results_list = [data]
-
-    # Check for diff results
-    diff_results = None
-    if type(data).__name__ == "dict" and "diff_results" in data:
-        diff_results = data["diff_results"]
 
     # Get run URL from environment
     run_url = None
@@ -98,8 +86,31 @@ def ci_comment(results: Optional[str], dry_run: bool, update: bool):
     if github_repo and github_run_id:
         run_url = f"{github_server}/{github_repo}/actions/runs/{github_run_id}"
 
-    # Generate comment
-    comment = generate_pr_comment(results_list, diff_results, run_url)
+    # Detect format: check --json output has "summary" with "total_tests",
+    # while run output has a list or "results" key.
+    is_check_format = (
+        isinstance(data, dict)
+        and "summary" in data
+        and "total_tests" in data.get("summary", {})
+    )
+
+    if is_check_format:
+        # Check --json format — use the dedicated check comment generator
+        comment = generate_check_pr_comment(data, run_url)
+    else:
+        # Legacy run format
+        if isinstance(data, list):
+            results_list = data
+        elif isinstance(data, dict) and "results" in data:
+            results_list = data["results"]
+        else:
+            results_list = [data]
+
+        diff_results = None
+        if isinstance(data, dict) and "diff_results" in data:
+            diff_results = data["diff_results"]
+
+        comment = generate_pr_comment(results_list, diff_results, run_url)
 
     if dry_run:
         console.print("[cyan]━━━ PR Comment Preview ━━━[/cyan]\n")

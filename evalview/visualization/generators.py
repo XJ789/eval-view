@@ -137,15 +137,51 @@ def _diff_rows(
     rows = []
     for d in diffs:
         status = str(getattr(d, "overall_severity", "passed")).lower().replace("diffstatus.", "")
-        golden_tools = getattr(d, "golden_tools", []) or []
-        actual_tools = getattr(d, "actual_tools", []) or []
         output_diff = getattr(d, "output_diff", None)
         similarity = round(getattr(output_diff, "similarity", 1.0) * 100, 1) if output_diff else 100.0
+        semantic_similarity = None
+        if output_diff and getattr(output_diff, "semantic_similarity", None) is not None:
+            semantic_similarity = round(output_diff.semantic_similarity * 100, 1)
         golden_out = getattr(output_diff, "golden_preview", "") if output_diff else ""
         actual_out = getattr(output_diff, "actual_preview", "") if output_diff else ""
         diff_lines = getattr(output_diff, "diff_lines", []) if output_diff else []
         score_delta = getattr(d, "score_diff", 0.0) or 0.0
         test_name = getattr(d, "test_name", "")
+
+        # Extract tool sequences from golden trace and tool_diffs
+        golden_tools: List[str] = []
+        actual_tools: List[str] = []
+        if golden_traces and test_name in golden_traces:
+            gt = golden_traces[test_name]
+            golden_tools = getattr(gt, "tool_sequence", []) or []
+        # Reconstruct actual tools from golden + diffs
+        tool_diffs = getattr(d, "tool_diffs", []) or []
+        if actual_results and test_name in actual_results:
+            try:
+                result = actual_results[test_name]
+                actual_tools = [
+                    str(getattr(s, "tool_name", None) or getattr(s, "step_name", "?"))
+                    for s in (result.trace.steps or [])
+                ]
+            except AttributeError:
+                pass
+
+        # Extract parameter diffs for the HTML template
+        param_diffs = []
+        for td in tool_diffs:
+            for pd in getattr(td, "parameter_diffs", []):
+                sim = None
+                if pd.similarity is not None:
+                    sim = round(pd.similarity * 100, 1)
+                param_diffs.append({
+                    "step": td.position + 1,
+                    "tool": td.golden_tool or td.actual_tool or "?",
+                    "param": pd.param_name,
+                    "golden": str(pd.golden_value)[:60] if pd.golden_value is not None else "",
+                    "actual": str(pd.actual_value)[:60] if pd.actual_value is not None else "",
+                    "type": pd.diff_type,
+                    "similarity": sim,
+                })
 
         # Generate side-by-side trajectory diagrams when trace data is available
         golden_diagram = ""
@@ -165,11 +201,13 @@ def _diff_rows(
             "status": status,
             "score_delta": round(score_delta, 1),
             "similarity": similarity,
+            "semantic_similarity": semantic_similarity,
             "golden_tools": golden_tools,
             "actual_tools": actual_tools,
             "golden_out": golden_out[:600],
             "actual_out": actual_out[:600],
             "diff_lines": diff_lines[:50],
+            "param_diffs": param_diffs,
             "golden_diagram": golden_diagram,
             "actual_diagram": actual_diagram,
         })
@@ -699,16 +737,19 @@ table tr:hover td{background:rgba(255,255,255,.02)}
           {% if d.score_delta != 0 %}
             <span class="badge {% if d.score_delta > 0 %}b-green{% else %}b-red{% endif %}">{% if d.score_delta > 0 %}+{% endif %}{{ d.score_delta }} pts</span>
           {% endif %}
-          <span class="sim">similarity <b style="color:{% if d.similarity >= 80 %}var(--green){% elif d.similarity >= 50 %}var(--yellow){% else %}var(--red){% endif %}">{{ d.similarity }}%</b></span>
+          <span class="sim">lexical <b style="color:{% if d.similarity >= 80 %}var(--green){% elif d.similarity >= 50 %}var(--yellow){% else %}var(--red){% endif %}">{{ d.similarity }}%</b></span>
+          {% if d.semantic_similarity is not none %}
+          <span class="sim">semantic <b style="color:{% if d.semantic_similarity >= 80 %}var(--green){% elif d.semantic_similarity >= 50 %}var(--yellow){% else %}var(--red){% endif %}">{{ d.semantic_similarity }}%</b></span>
+          {% endif %}
         </div>
         <div class="diff-cols">
           <div class="diff-col">
-            <div class="col-title">Golden</div>
+            <div class="col-title">Baseline</div>
             <div class="tags">{% for t in d.golden_tools %}<span class="tag {% if t not in d.actual_tools %}rem{% endif %}">{{ t }}</span>{% endfor %}</div>
             <div class="outbox">{{ d.golden_out }}</div>
           </div>
           <div class="diff-col">
-            <div class="col-title">Actual</div>
+            <div class="col-title">Current</div>
             <div class="tags">{% for t in d.actual_tools %}<span class="tag {% if t not in d.golden_tools %}add{% endif %}">{{ t }}</span>{% endfor %}</div>
             <div class="outbox">{{ d.actual_out }}</div>
             {% if d.diff_lines %}
@@ -716,6 +757,35 @@ table tr:hover td{background:rgba(255,255,255,.02)}
             {% endif %}
           </div>
         </div>
+        {% if d.param_diffs %}
+        <div style="padding:16px 20px;border-top:1px solid var(--border)">
+          <div class="col-title" style="margin-bottom:12px">Parameter Changes</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Step</th>
+                <th style="text-align:left;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Tool</th>
+                <th style="text-align:left;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Parameter</th>
+                <th style="text-align:left;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Baseline</th>
+                <th style="text-align:left;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Current</th>
+                <th style="text-align:center;padding:6px 10px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">Match</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in d.param_diffs %}
+              <tr>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--muted)">{{ p.step }}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);font-family:monospace;color:var(--blue)">{{ p.tool }}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:600">{{ p.param }}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;{% if p.type == 'missing' %}color:var(--red){% else %}color:var(--muted){% endif %}">{{ p.golden or '—' }}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;{% if p.type == 'added' %}color:var(--green){% else %}color:var(--muted){% endif %}">{{ p.actual or '—' }}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:center;font-weight:600;color:{% if p.type == 'added' %}var(--green){% elif p.type == 'missing' %}var(--red){% elif p.similarity is not none %}{% if p.similarity >= 80 %}var(--green){% elif p.similarity >= 50 %}var(--yellow){% else %}var(--red){% endif %}{% else %}var(--yellow){% endif %}">{% if p.type == 'added' %}+new{% elif p.type == 'missing' %}-gone{% elif p.similarity is not none %}{{ p.similarity }}%{% else %}~{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
         {% if d.golden_diagram or d.actual_diagram %}
         <div class="traj-grid">
           <div class="traj-col">
